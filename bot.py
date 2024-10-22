@@ -60,25 +60,32 @@ def retry_request(func, *args, retries=3, delay=5, **kwargs):
                 raise
 
 def get_token_and_login(payload):
+    """Login and return the access token. Retry on failure."""
     time.sleep(5)
     headers = get_headers()
     body = json.dumps({"webAppData": payload})
     print(f"{Fore.CYAN}Attempting to login with payload...{Style.RESET_ALL}")
-    try:
-        response = requests.post(f"{BASE_API_URL}{Endpoints.AUTH_LOGIN}", headers=headers, data=body, timeout=10)
-        response.raise_for_status()
-        token = response.json().get("jwt", {}).get("access", {}).get("token", None)
-        if token:
-            print(f"{Fore.GREEN}Login successful.{Style.RESET_ALL}")
-            return token
-        else:
-            raise ValueError("Failed to retrieve token from response.")
-    except requests.RequestException as e:
-        print(f"{Fore.RED}Request failed during login: {e}{Style.RESET_ALL}")
-        raise
-    except ValueError as e:
-        print(f"{Fore.RED}Value error: {e}{Style.RESET_ALL}")
-        raise
+    
+    for attempt in range(3): 
+        try:
+            response = requests.post(f"{BASE_API_URL}{Endpoints.AUTH_LOGIN}", headers=headers, data=body, timeout=10)
+            response.raise_for_status()
+            token = response.json().get("jwt", {}).get("access", {}).get("token", None)
+            if token:
+                print(f"{Fore.GREEN}Login successful.{Style.RESET_ALL}")
+                return token
+            else:
+                raise ValueError("Failed to retrieve token from response.")
+        except requests.RequestException as e:
+            print(f"{Fore.RED}Request failed during login: {e}{Style.RESET_ALL}")
+            if attempt < 2:
+                print(f"{Fore.YELLOW}Retrying login in 5 seconds...{Style.RESET_ALL}")
+                time.sleep(5)
+            else:
+                raise
+        except ValueError as e:
+            print(f"{Fore.RED}Value error: {e}{Style.RESET_ALL}")
+            raise
 
 def get_user_info(token, send_message=True):
     time.sleep(5)
@@ -135,7 +142,7 @@ def daily_bonus(token):
     except KeyError as e:
         print(f"{Fore.RED}Key error in daily bonus response: {e}{Style.RESET_ALL}")
 
-def fetch_and_check_tasks(token):
+def process_tasks(token):
     time.sleep(5)
     headers = get_headers(token)
     print(f"{Fore.CYAN}Fetching and checking tasks from the category....{Style.RESET_ALL}")
@@ -157,11 +164,19 @@ def fetch_and_check_tasks(token):
                 print(f"{Fore.BLUE}Task: {task['name']}, Status: {task['status']}, Claim Allowed: {task.get('claimAllowed', 'Not Specified')}{Style.RESET_ALL}")
 
                 if task.get("claimAllowed") is True:
-                    claim_task(token, task["id"])
+                    print(f"{Fore.CYAN}Attempting to claim task with ID: {task['id']}{Style.RESET_ALL}")
+                    claim_response = requests.put(f"{BASE_API_URL}{Endpoints.CLAIM_TASK.format(task_id=task['id'])}", headers=headers)
+                    claim_response.raise_for_status()
+                    claim_data = claim_response.json()
+                    print(f"{Fore.GREEN}Claim response data: {claim_data}{Style.RESET_ALL}") 
                     any_claimed_or_clicked = True
 
                 elif task.get("claimAllowed") is False and task_category['name'] == "Daily":
-                    verify_daily_task(token, task["id"])
+                    print(f"{Fore.CYAN}Attempting to verify daily task with ID: {task['id']}{Style.RESET_ALL}")
+                    verify_response = requests.put(f"{BASE_API_URL}{Endpoints.VERIFY_TASK.format(task_id=task['id'])}", headers=headers)
+                    verify_response.raise_for_status()
+                    verify_data = verify_response.json()
+                    print(f"{Fore.GREEN}Verify response data: {verify_data}{Style.RESET_ALL}") 
                     any_claimed_or_clicked = True
 
         if not any_claimed_or_clicked:
@@ -178,28 +193,6 @@ def fetch_and_check_tasks(token):
     except Exception as e:
         print(f"{Fore.RED}An error occurred: {e}{Style.RESET_ALL}")
         return False
-
-def claim_task(token, task_id):
-    headers = get_headers(token)
-    try:
-        print(f"{Fore.CYAN}Attempting to claim task with ID: {task_id}{Style.RESET_ALL}")
-        response = requests.put(f"{BASE_API_URL}{Endpoints.CLAIM_TASK.format(task_id=task_id)}", headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        print(f"{Fore.GREEN}Claim response data: {data}{Style.RESET_ALL}") 
-    except requests.RequestException as e:
-        print(f"{Fore.RED}Request failed while claiming task ID {task_id}: {e}{Style.RESET_ALL}")
-
-def verify_daily_task(token, task_id):
-    headers = get_headers(token)
-    try:
-        print(f"{Fore.CYAN}Attempting to verify daily task with ID: {task_id}{Style.RESET_ALL}")
-        response = requests.put(f"{BASE_API_URL}{Endpoints.VERIFY_TASK.format(task_id=task_id)}", headers=headers)
-        response.raise_for_status()
-        data = response.json()
-        print(f"{Fore.GREEN}Verify response data: {data}{Style.RESET_ALL}") 
-    except requests.RequestException as e:
-        print(f"{Fore.RED}Request failed while verifying task ID {task_id}: {e}{Style.RESET_ALL}")
         
 def claim_referral(token):
     headers = get_headers(token)
@@ -214,6 +207,7 @@ def claim_referral(token):
         print(f"{Fore.RED}Response status code: {response.status_code}, Response body: {response.text}{Style.RESET_ALL}")
 
 def process_single_query(query):
+    """Process a single account query."""
     try:
         token = retry_request(get_token_and_login, query.strip())
         user_info = retry_request(get_user_info, token, send_message=False)
@@ -221,8 +215,7 @@ def process_single_query(query):
 
         daily_bonus(token)
         claim_referral(token)
-
-        tasks_available = retry_request(fetch_and_check_tasks, token)
+        tasks_available = process_tasks(token)
 
         if not tasks_available:
             print(f"{Fore.YELLOW}No tasks available to claim for account {user_info['tgUsername']}. Moving to next account.{Style.RESET_ALL}")
@@ -237,9 +230,33 @@ def process_single_query(query):
         else:
             print(f"{Fore.YELLOW}No change in balance for account {updated_user_info['tgUsername']}. Skipping message.{Style.RESET_ALL}")
             return None
-    except Exception as e:
-        print(f"{Fore.RED}Error processing query: {e}{Style.RESET_ALL}")
-        return None
+    except (requests.RequestException, ValueError) as e:
+        print(f"{Fore.RED}Error processing query: {e}. Attempting to re-login...{Style.RESET_ALL}")
+        try:
+            token = retry_request(get_token_and_login, query.strip())
+            user_info = retry_request(get_user_info, token, send_message=False)
+            old_balance = user_info['balance']
+
+            daily_bonus(token)
+            claim_referral(token)
+            tasks_available = process_tasks(token)
+
+            if not tasks_available:
+                print(f"{Fore.YELLOW}No tasks available to claim for account {user_info['tgUsername']}. Moving to next account.{Style.RESET_ALL}")
+                return None
+
+            updated_user_info = retry_request(get_user_info, token)
+            new_balance = updated_user_info['balance']
+
+            if new_balance != old_balance:
+                account_balance_message = f"<b>Account:</b> {updated_user_info['tgUsername']}\n<b>Balance:</b> {new_balance}"
+                return account_balance_message
+            else:
+                print(f"{Fore.YELLOW}No change in balance for account {updated_user_info['tgUsername']}. Skipping message.{Style.RESET_ALL}")
+                return None
+        except Exception as re_login_error:
+            print(f"{Fore.RED}Re-login failed: {re_login_error}{Style.RESET_ALL}")
+            return None
 
 def process_queries():
     if not os.path.exists('sesi.txt'):
